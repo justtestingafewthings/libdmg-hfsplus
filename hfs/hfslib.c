@@ -688,83 +688,291 @@ void hfs_ls(Volume* volume, const char* path) {
 	free(record);
 }
 
-void hfs_untar(Volume* volume, AbstractFile* tarFile) {
-	size_t tarSize = tarFile->getLength(tarFile);
-	size_t curRecord = 0;
-	char block[512];
+/* Tar fields are fixed-width byte arrays, not C strings. */
+#define TAR_PATH_SIZE 4096
 
-	while(curRecord < tarSize) {
-		tarFile->seek(tarFile, curRecord);
-		tarFile->read(tarFile, block, 512);
-
-		uint32_t mode = 0;
-		char* fileName = NULL;
-		const char* target = NULL;
-		uint32_t type = 0;
-		uint32_t size;
-		uint32_t uid;
-		uint32_t gid;
-
-		sscanf(&block[100], "%o", &mode);
-		fileName = &block[0];
-		sscanf(&block[156], "%o", &type);
-		target = &block[157];
-		sscanf(&block[124], "%o", &size);
-		sscanf(&block[108], "%o", &uid);
-		sscanf(&block[116], "%o", &gid);
-
-		if(fileName[0] == '\0')
-			break;
-
-		if(fileName[0] == '.' && fileName[1] == '/') {
-			fileName += 2;
+static int tarNumber(const unsigned char* field, size_t length, uint64_t* value) {
+	size_t i = 0;
+	*value = 0;
+	if(field[0] & 0x80) {
+		/* GNU base-256, positive values only. */
+		if(field[0] & 0x40) return FALSE;
+		*value = field[0] & 0x3f;
+		for(i = 1; i < length; i++) {
+			if(*value > (UINT64_MAX - field[i]) / 256) return FALSE;
+			*value = *value * 256 + field[i];
 		}
-
-		if(fileName[0] == '\0')
-			goto loop;
-
-		if(fileName[strlen(fileName) - 1] == '/')
-			fileName[strlen(fileName) - 1] = '\0';
-
-		HFSPlusCatalogRecord* record = getRecordFromPath3(fileName, volume, NULL, NULL, TRUE, FALSE, kHFSRootFolderID);
-		if(record) {
-			if(record->recordType == kHFSPlusFolderRecord || type == 5) {
-				if(!silence)
-					printf("ignoring %s, type = %d\n", fileName, type);
-				free(record);
-				goto loop;
-			} else {
-				printf("replacing %s\n", fileName);
-				free(record);
-				removeFile(fileName, volume);
-			}
-		}
-
-		if(type == 0) {
-			if(!silence)
-				printf("file: %s (%04o), size = %d\n", fileName, mode, size);
-			void* buffer = malloc(size);
-			tarFile->seek(tarFile, curRecord + 512);
-			tarFile->read(tarFile, buffer, size);
-			AbstractFile* inFile = createAbstractFileFromMemory(&buffer, size);
-			add_hfs(volume, inFile, fileName);
-			free(buffer);
-		} else if(type == 5) {
-			if(!silence)
-				printf("directory: %s (%04o)\n", fileName, mode);
-			newFolder(fileName, volume);
-		} else if(type == 2) {
-			if(!silence)
-				printf("symlink: %s (%04o) -> %s\n", fileName, mode, target);
-			makeSymlink(fileName, target, volume);
-		}
-
-		chmodFile(fileName, mode, volume);
-		chownFile(fileName, uid, gid, volume);
-
-loop:
-
-		curRecord = (curRecord + 512) + ((size + 511) / 512 * 512);
+		return TRUE;
 	}
+	while(i < length && field[i] == ' ') i++;
+	for(; i < length && field[i] >= '0' && field[i] <= '7'; i++) {
+		if(*value > (UINT64_MAX - (field[i] - '0')) / 8) return FALSE;
+		*value = *value * 8 + field[i] - '0';
+	}
+	for(; i < length; i++)
+		if(field[i] != 0 && field[i] != ' ') return FALSE;
+	return TRUE;
+}
 
+static int tarRead(AbstractFile* file, off_t offset, void* data, size_t size) {
+	return file->seek(file, offset) == 0 && file->read(file, data, size) == size;
+}
+
+static void tarString(char* dest, const unsigned char* field, size_t size) {
+	size_t length = 0;
+	while(length < size && field[length]) length++;
+	memcpy(dest, field, length);
+	dest[length] = 0;
+}
+
+/* Reject traversal and components that overflow the catalog's HFSUniStr255. */
+static int tarPath(char* path) {
+	char* src = path;
+	char* dst = path;
+	if(*src == '/') return FALSE;
+	while(*src) {
+		char* start;
+		size_t length;
+		while(*src == '/') src++;
+		start = src;
+		while(*src && *src != '/') src++;
+		length = src - start;
+		if(!length || (length == 1 && start[0] == '.')) continue;
+		if(length > 255 || (length == 2 && start[0] == '.' && start[1] == '.')) return FALSE;
+		if(dst != path) *dst++ = '/';
+		memmove(dst, start, length);
+		dst += length;
+	}
+	*dst = 0;
+	return TRUE;
+}
+
+/* Check every parent without following symlinks, including links in the image. */
+static int tarParents(char* path, Volume* volume) {
+	char* p;
+	for(p = path; *p; p++) {
+		HFSPlusCatalogRecord* record;
+		if(*p != '/') continue;
+		*p = 0;
+		record = getRecordFromPath3(path, volume, NULL, NULL, FALSE, FALSE, kHFSRootFolderID);
+		if(!record) {
+			if(!newFolder(path, volume)) { *p = '/'; return FALSE; }
+		} else if(record->recordType != kHFSPlusFolderRecord) {
+			free(record);
+			*p = '/';
+			return FALSE;
+		}
+		free(record);
+		*p = '/';
+	}
+	return TRUE;
+}
+
+/* Unlike add_hfs, keep write/allocation errors in the checked tar API. */
+static int tarWrite(Volume* volume, const char* name, FILE* data, const char* target, off_t size) {
+	HFSPlusCatalogFile* record;
+	io_func* io;
+	unsigned char buffer[65536];
+	off_t offset = 0;
+	int result;
+	if(!newFile(name, volume)) return FALSE;
+	record = (HFSPlusCatalogFile*)getRecordFromPath3(name, volume, NULL, NULL, FALSE, FALSE, kHFSRootFolderID);
+	if(!record) return FALSE;
+	io = openRawFile(record->fileID, &record->dataFork, (HFSPlusCatalogRecord*)record, volume);
+	if(!io) {
+		free(record);
+		removeFile(name, volume);
+		return FALSE;
+	}
+	result = allocate((RawFile*)io->data, size);
+	while(result && offset < size) {
+		size_t count = (uint64_t)(size - offset) > sizeof(buffer) ? sizeof(buffer) : (size_t)(size - offset);
+		if(data) {
+			result = fread(buffer, 1, count, data) == count;
+		} else {
+			memcpy(buffer, target + offset, count);
+		}
+		if(result) result = WRITE(io, offset, count, buffer);
+		offset += count;
+	}
+	CLOSE(io);
+	free(record);
+	if(!result) removeFile(name, volume);
+	return result;
+}
+
+static int tarExtract(Volume* volume, char* name, const char* target, char type,
+		uint64_t mode, uint64_t uid, uint64_t gid, FILE* data, off_t size) {
+	HFSPlusCatalogRecord* record;
+	HFSPlusBSDInfo* permissions;
+	int exists;
+	if(!tarParents(name, volume)) return FALSE;
+	record = getRecordFromPath3(name, volume, NULL, NULL, FALSE, FALSE, kHFSRootFolderID);
+	exists = record != NULL;
+	if(record && (record->recordType == kHFSPlusFolderRecord || type == '5')) {
+		int compatible = record->recordType == kHFSPlusFolderRecord && type == '5';
+		if(!compatible) { free(record); return FALSE; }
+	}
+	if(type != '5') {
+		uint64_t blockSize = volume->volumeHeader->blockSize;
+		uint64_t available = volume->volumeHeader->freeBlocks;
+		if(type == '2') size = (off_t)strlen(target);
+		if(record && record->recordType == kHFSPlusFileRecord) {
+			available += ((HFSPlusCatalogFile*)record)->dataFork.totalBlocks;
+			available += ((HFSPlusCatalogFile*)record)->resourceFork.totalBlocks;
+		}
+		if(size < 0 || !blockSize || (uint64_t)size / blockSize + ((uint64_t)size % blockSize != 0) > available) {
+			free(record);
+			return FALSE;
+		}
+	}
+	free(record);
+	if(type == '5') {
+		if(!exists && !newFolder(name, volume)) return FALSE;
+	} else {
+		if(exists && !removeFile(name, volume)) return FALSE;
+		if(!tarWrite(volume, name, data, target, size)) return FALSE;
+	}
+	record = getRecordFromPath3(name, volume, NULL, NULL, FALSE, FALSE, kHFSRootFolderID);
+	if(!record) return FALSE;
+	if(record->recordType == kHFSPlusFolderRecord) {
+		permissions = &((HFSPlusCatalogFolder*)record)->permissions;
+	} else if(record->recordType == kHFSPlusFileRecord) {
+		HFSPlusCatalogFile* file = (HFSPlusCatalogFile*)record;
+		permissions = &file->permissions;
+		if(type == '2') {
+			permissions->fileMode = S_IFLNK;
+			file->userInfo.fileType = kSymLinkFileType;
+			file->userInfo.fileCreator = kSymLinkCreator;
+		}
+	} else { free(record); return FALSE; }
+	/* Updating the record directly also handles dangling links and never chmods their targets. */
+	permissions->fileMode = (permissions->fileMode & S_IFMT) | (mode & 07777);
+	permissions->ownerID = uid;
+	permissions->groupID = gid;
+	{
+		int result = updateCatalog(volume, record);
+		free(record);
+		return result;
+	}
+}
+
+/* First pass validates the whole archive before any image changes. The second
+ * stages each regular file on disk before replacing an existing catalog entry. */
+static int tarPass(Volume* volume, AbstractFile* tarFile, int extract) {
+	off_t length = tarFile->getLength(tarFile);
+	uint64_t offset = 0;
+	char longName[TAR_PATH_SIZE] = {0};
+	char longLink[1024] = {0};
+	int haveName = FALSE, haveLink = FALSE;
+	if(length < 0 || (uint64_t)length % 512) return FALSE;
+	while(offset < (uint64_t)length) {
+		unsigned char block[512];
+		unsigned char buffer[65536];
+		char name[TAR_PATH_SIZE], target[1024];
+		uint64_t size, mode, uid, gid, checksum, padded, pos;
+		unsigned int sum = 0;
+		int signedSum = 0;
+		size_t i;
+		char type;
+		FILE* staging = NULL;
+		if((uint64_t)length - offset < 512 || !tarRead(tarFile, (off_t)offset, block, 512)) return FALSE;
+		for(i = 0; i < 512 && !block[i]; i++) { }
+		if(i == 512) {
+			if(haveName || haveLink || (uint64_t)length - offset < 1024) return FALSE;
+			/* Require the two end blocks and only zero padding thereafter. */
+			for(pos = offset + 512; pos < (uint64_t)length;) {
+				size_t count = (uint64_t)length - pos > sizeof(buffer) ? sizeof(buffer) : (size_t)((uint64_t)length - pos);
+				if(!tarRead(tarFile, (off_t)pos, buffer, count)) return FALSE;
+				for(i = 0; i < count; i++) if(buffer[i]) return FALSE;
+				pos += count;
+			}
+			return TRUE;
+		}
+		if(!tarNumber(block + 148, 8, &checksum)) return FALSE;
+		for(i = 0; i < 512; i++) {
+			unsigned char c = i >= 148 && i < 156 ? ' ' : block[i];
+			sum += c;
+			signedSum += (signed char)c;
+		}
+		if(checksum != sum && (signedSum < 0 || checksum != (uint64_t)signedSum)) return FALSE;
+		if(!tarNumber(block + 124, 12, &size) ||
+		   !tarNumber(block + 100, 8, &mode) || mode > 07777 ||
+		   !tarNumber(block + 108, 8, &uid) || uid > UINT32_MAX ||
+		   !tarNumber(block + 116, 8, &gid) || gid > UINT32_MAX) return FALSE;
+		if(size > (uint64_t)length - offset - 512) return FALSE;
+		padded = size + ((512 - size % 512) % 512);
+		if(padded < size || padded > (uint64_t)length - offset - 512) return FALSE;
+		type = block[156] ? block[156] : '0';
+		if(type == 'L' || type == 'K') {
+			char* dest = type == 'L' ? longName : longLink;
+			size_t capacity = type == 'L' ? sizeof(longName) : sizeof(longLink);
+			if(!size || size > capacity || (type == 'L' ? haveName : haveLink)) return FALSE;
+			if(!tarRead(tarFile, (off_t)(offset + 512), dest, (size_t)size) || dest[size - 1] != 0 ||
+			   memchr(dest, 0, (size_t)size - 1)) return FALSE;
+			if(type == 'L') haveName = TRUE; else haveLink = TRUE;
+			offset += 512 + padded;
+			continue;
+		}
+		/* Fail explicitly for PAX, hardlinks, sparse files and special files. */
+		if(type != '0' && type != '2' && type != '5') return FALSE;
+		if(type != '0' && size) return FALSE;
+		if(haveLink && type != '2') return FALSE;
+		tarString(name, block, 100);
+		if(!haveName && !memcmp(block + 257, "ustar\0", 6) && block[345]) {
+			char prefix[156], base[101];
+			tarString(prefix, block + 345, 155);
+			tarString(base, block, 100);
+			snprintf(name, sizeof(name), "%s/%s", prefix, base);
+		} else if(haveName) {
+			strcpy(name, longName);
+		}
+		tarString(target, block + 157, 100);
+		if(haveLink) strcpy(target, longLink);
+		haveName = haveLink = FALSE;
+		if(!name[0] || !tarPath(name) || (!name[0] && type != '5') ||
+		   (type == '2' && !target[0])) return FALSE;
+		if(extract && type == '0') {
+			staging = tmpfile();
+			if(!staging) return FALSE;
+		}
+		for(pos = 0; pos < size;) {
+			size_t count = size - pos > sizeof(buffer) ? sizeof(buffer) : (size_t)(size - pos);
+			if(!tarRead(tarFile, (off_t)(offset + 512 + pos), buffer, count) ||
+			   (staging && fwrite(buffer, 1, count, staging) != count)) {
+				if(staging) fclose(staging);
+				return FALSE;
+			}
+			pos += count;
+		}
+		if(staging && (fflush(staging) || fseeko(staging, 0, SEEK_SET))) {
+			fclose(staging);
+			return FALSE;
+		}
+		if(extract && name[0] && !tarExtract(volume, name, target, type, mode, uid, gid, staging, (off_t)size)) {
+			fprintf(stderr, "untar: cannot extract %s\n", name);
+			if(staging) fclose(staging);
+			return FALSE;
+		}
+		if(staging) fclose(staging);
+		offset += 512 + padded;
+	}
+	return FALSE; /* Missing end-of-archive marker. */
+}
+
+int hfs_untar_checked(Volume* volume, AbstractFile* tarFile) {
+	if(!volume || !tarFile || !tarFile->getLength || !tarFile->read || !tarFile->seek ||
+	   !tarPass(volume, tarFile, FALSE)) {
+		fprintf(stderr, "untar: invalid, truncated, or unsupported archive\n");
+		return FALSE;
+	}
+	if(!tarPass(volume, tarFile, TRUE)) {
+		fprintf(stderr, "untar: extraction failed\n");
+		return FALSE;
+	}
+	return TRUE;
+}
+
+void hfs_untar(Volume* volume, AbstractFile* tarFile) {
+	(void)hfs_untar_checked(volume, tarFile);
 }

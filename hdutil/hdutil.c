@@ -251,24 +251,21 @@ void cmd_grow(Volume* volume, int argc, const char *argv[]) {
 	printf("grew volume: %" PRId64 "\n", newSize);
 }
 
-void cmd_untar(Volume* volume, int argc, const char *argv[]) {
-	AbstractFile *inFile;
-
+int cmd_untar(Volume* volume, int argc, const char *argv[]) {
+	AbstractFile* input;
+	int result;
 	if(argc < 2) {
-		printf("Not enough arguments\n");
-		return;
+		fprintf(stderr, "untar: missing archive path\n");
+		return 1;
 	}
-
-	inFile = createAbstractFileFromFile(fopen(argv[1], "rb"));
-
-	if(inFile == NULL) {
-		printf("file to untar not found\n");
-		return;
+	input = createAbstractFileFromFile(fopen(argv[1], "rb"));
+	if(!input) {
+		fprintf(stderr, "untar: cannot open archive\n");
+		return 1;
 	}
-
-	hfs_untar(volume, inFile);
-
-    inFile->close(inFile);
+	result = hfs_untar_checked(volume, input);
+	input->close(input);
+	return result ? 0 : 1;
 }
 
 void TestByteOrder()
@@ -283,6 +280,7 @@ int main(int argc, const char *argv[]) {
 	Volume* volume;
 	AbstractFile* image;
 	int argOff;
+	int status = 0;
 
 	TestByteOrder();
 
@@ -348,12 +346,12 @@ int main(int argc, const char *argv[]) {
 		} else if(strcmp(argv[argOff], "grow") == 0) {
 			cmd_grow(volume, argc - argOff, argv + argOff);
 		} else if(strcmp(argv[argOff], "untar") == 0) {
-			cmd_untar(volume, argc - argOff, argv + argOff);
+			status = cmd_untar(volume, argc - argOff, argv + argOff);
 		}
 	}
 
 	closeVolume(volume);
 	CLOSE(io);
 
-	return 0;
+	return status;
 }

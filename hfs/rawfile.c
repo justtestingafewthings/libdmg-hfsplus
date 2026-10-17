@@ -31,6 +31,7 @@ int allocate(RawFile* rawFile, off_t size) {
 	Volume* volume;
 	HFSPlusForkData* forkData;
 	uint32_t blocksNeeded;
+	uint64_t requiredBlocks;
 	uint32_t blocksToAllocate;
 	Extent* extent;
 	Extent* lastExtent;
@@ -41,15 +42,25 @@ int allocate(RawFile* rawFile, off_t size) {
 	forkData = rawFile->forkData;
 	extent = rawFile->extents;
 
-	blocksNeeded = ((uint64_t)size / (uint64_t)volume->volumeHeader->blockSize) + (((size % volume->volumeHeader->blockSize) == 0) ? 0 : 1);
+	if(size < 0 || volume->volumeHeader->blockSize == 0) {
+		return FALSE;
+	}
+	requiredBlocks = (uint64_t)size / volume->volumeHeader->blockSize
+		+ (size % volume->volumeHeader->blockSize != 0);
+	if(requiredBlocks > UINT32_MAX) {
+		return FALSE;
+	}
+	blocksNeeded = (uint32_t)requiredBlocks;
 
 	if(blocksNeeded > forkData->totalBlocks) {
-		zeros = (unsigned char*) malloc(volume->volumeHeader->blockSize);
-		memset(zeros, 0, volume->volumeHeader->blockSize);
-
 		blocksToAllocate = blocksNeeded - forkData->totalBlocks;
 
 		if(blocksToAllocate > volume->volumeHeader->freeBlocks) {
+			return FALSE;
+		}
+
+		zeros = (unsigned char*) calloc(1, volume->volumeHeader->blockSize);
+		if(zeros == NULL) {
 			return FALSE;
 		}
 
@@ -88,7 +99,7 @@ int allocate(RawFile* rawFile, off_t size) {
 				}
 
 				/* zero out allocated block */
-				ASSERT(WRITE(volume->image, curBlock * volume->volumeHeader->blockSize, volume->volumeHeader->blockSize, zeros), "WRITE");
+				ASSERT(WRITE(volume->image, (off_t)curBlock * volume->volumeHeader->blockSize, volume->volumeHeader->blockSize, zeros), "WRITE");
 
 				setBlockUsed(volume, curBlock, TRUE);
 				volume->volumeHeader->freeBlocks--;

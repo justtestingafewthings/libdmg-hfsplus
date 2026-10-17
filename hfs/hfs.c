@@ -114,6 +114,23 @@ void cmd_add(Volume* volume, int argc, const char *argv[]) {
 	add_hfs(volume, inFile, argv[2]);
 }
 
+int cmd_untar(Volume* volume, int argc, const char *argv[]) {
+	AbstractFile* input;
+	int result;
+	if(argc < 2) {
+		fprintf(stderr, "untar: missing archive path\n");
+		return 1;
+	}
+	input = createAbstractFileFromFile(fopen(argv[1], "rb"));
+	if(!input) {
+		fprintf(stderr, "untar: cannot open archive\n");
+		return 1;
+	}
+	result = hfs_untar_checked(volume, input);
+	input->close(input);
+	return result ? 0 : 1;
+}
+
 void cmd_rm(Volume* volume, int argc, const char *argv[]) {
 	if(argc > 1) {
 		removeFile(argv[1], volume);
@@ -294,11 +311,12 @@ void TestByteOrder()
 int main(int argc, const char *argv[]) {
 	io_func* io;
 	Volume* volume;
+	int status = 0;
 
 	TestByteOrder();
 
 	if(argc < 3) {
-		printf("usage: %s <image-file> <ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|debug> <arguments>\n", argv[0]);
+		printf("usage: %s <image-file> <ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|untar|debug> <arguments>\n", argv[0]);
 		return 0;
 	}
 
@@ -344,6 +362,8 @@ int main(int argc, const char *argv[]) {
 			cmd_addall(volume, argc - 2, argv + 2);
 		} else if(strcmp(argv[2], "grow") == 0) {
 			cmd_grow(volume, argc - 2, argv + 2);
+		} else if(strcmp(argv[2], "untar") == 0) {
+			status = cmd_untar(volume, argc - 2, argv + 2);
 		} else if(strcmp(argv[2], "getattr") == 0) {
 			cmd_getattr(volume, argc - 2, argv + 2);
 		} else if(strcmp(argv[2], "debug") == 0) {
@@ -358,5 +378,5 @@ int main(int argc, const char *argv[]) {
 	closeVolume(volume);
 	CLOSE(io);
 
-	return 0;
+	return status;
 }

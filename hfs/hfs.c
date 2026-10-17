@@ -316,7 +316,7 @@ int main(int argc, const char *argv[]) {
 	TestByteOrder();
 
 	if(argc < 3) {
-		printf("usage: %s <image-file> <ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|untar|debug> <arguments>\n", argv[0]);
+		printf("usage: %s <image-file> <ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|grow|untar|getattr|debug> <arguments>\n", argv[0]);
 		return 0;
 	}
 

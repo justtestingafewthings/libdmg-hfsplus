@@ -36,6 +36,9 @@ libcrypto from openssl. If libcrypto is not available, then all FileVault
 related actions will fail, but everything else should still work. To
 deliberately disable FileVault support, use `CFLAGS=-UHAVE_CRYPT`.
 
+The checked HFS+ manifest CLI additionally requires json-c and OpenSSL's
+libcrypto. These dependencies do not change the core library API.
+
 USING
 -----
 
@@ -48,11 +51,45 @@ does not have dependencies on the dmg directory.
 
 To build everything:
 
-    cmake .
-    make
+    cmake -S . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    cmake --build build
 
 After running cmake, individual projects can also be built like:
 
-    make -C hfs
-    make -C dmg
-    make -C hdutil
+    cmake --build build --target hfsplus
+    cmake --build build --target dmg-bin
+    cmake --build build --target hdutil
+
+Create a fresh bare HFS+ or HFSX filesystem, check it, and convert it to a DMG:
+
+    hfsplus root.raw create 2g -n Root -s -b 4096
+    hfsplus root.raw verify
+    dmg dmg root.raw root.dmg
+
+`create` refuses existing paths and creates a sparse, unjournaled image. Sizes
+accept k/m/g/t suffixes, must be at least 16 MiB and must be block aligned.
+Block sizes are powers of two from 512 through 1048576 bytes. The default is
+case-insensitive HFS+ with 4096-byte blocks. Use `-s` for case-sensitive HFSX
+or `-i` for HFS+. Volume names accept printable ASCII except slash and colon.
+`verify` checks geometry, B-trees, catalog counts, fork allocation and clean
+internal journals. It opens the image read-only and does not repair it.
+
+Native manifest interchange preserves Apple metadata without applying host
+ownership or xattrs:
+
+    hfsplus source.raw extractall tree --manifest manifest.json
+    hfsplus - validateall tree --manifest manifest.json
+    hfsplus empty.raw addall tree / --manifest manifest.json
+    hfsplus empty.raw verify
+
+Export paths must be new. Keep `manifest.json.files/` beside the JSON file.
+Import requires a fresh empty volume with matching case mode and block size.
+The `apple-firmware.hfs-native/1` schema retains names, CNIDs, catalog timestamps,
+BSD flags, FinderInfo, native file hardlinks, ASCII-named inline xattrs and fork
+data. Allocation layout and volume UUIDs are rebuilt. Validation checks paths,
+links and hashes, and decodes original compressed storage before import.
+Supported decmpfs types are 1, 3/4, 7/8, 9/10 and 11/12.
+
+Clean internal journals retain their data with relocated allocation addresses.
+External journals, pending transactions and unsupported metadata fail explicitly.
+These commands need no mount, driver, system formatter or root privileges.

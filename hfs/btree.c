@@ -225,8 +225,27 @@ static void* searchNode(BTree* tree, uint32_t root, BTKey* searchKey, int *exact
   }
 
   if(lastRecordDataOffset == 0) {
-    hfs_panic("BTree inconsistent!");
-    return NULL;
+    /* A search below the first key is valid, especially for an attribute-less
+     * CNID. Return the first leaf position, with exact cleared, for iterators. */
+    if(exact) *exact = FALSE;
+    if(!descriptor->numRecords) {
+      if(nodeNumber) *nodeNumber = 0;
+      if(recordNumber) *recordNumber = 0;
+      free(descriptor);
+      return NULL;
+    }
+    recordOffset = getRecordOffset(0, root, tree);
+    key = READ_KEY(tree, recordOffset, tree->io);
+    recordDataOffset = recordOffset + key->keyLength + sizeof(key->keyLength);
+    free(key);
+    if(descriptor->kind == kBTIndexNode) {
+      free(descriptor);
+      return searchNode(tree, getNodeNumberFromPointerRecord(recordDataOffset, tree->io), searchKey, exact, nodeNumber, recordNumber);
+    }
+    if(nodeNumber) *nodeNumber = root;
+    if(recordNumber) *recordNumber = 0;
+    free(descriptor);
+    return READ_DATA(tree, recordDataOffset, tree->io);
   }
 
   if(descriptor->kind == kBTLeafNode) {
@@ -261,6 +280,12 @@ static void* searchNode(BTree* tree, uint32_t root, BTKey* searchKey, int *exact
 }
 
 void* search(BTree* tree, BTKey* searchKey, int *exact, uint32_t *nodeNumber, int *recordNumber) {
+  if(tree->headerRec->rootNode == 0) {
+    if(exact) *exact = FALSE;
+    if(nodeNumber) *nodeNumber = 0;
+    if(recordNumber) *recordNumber = 0;
+    return NULL;
+  }
   return searchNode(tree, tree->headerRec->rootNode, searchKey, exact, nodeNumber, recordNumber);
 }
 
@@ -1120,6 +1145,86 @@ static int doAddRecord(BTree* tree, uint32_t root, BTKey* searchKey, size_t leng
   return TRUE;
 }
 
+typedef struct { unsigned char* bytes; size_t size; } KeyBuffer;
+static int keyBufferWrite(io_func* io, off_t offset, size_t size, void* data) {
+  KeyBuffer* buffer = io->data;
+  if(offset < 0 || (uint64_t)offset + size > buffer->size) return FALSE;
+  memcpy(buffer->bytes + offset, data, size);
+  return TRUE;
+}
+
+/* Split by occupied bytes, including the new record. Splitting by record count
+ * can leave a half with too little space for a large decmpfs inline attribute;
+ * writing into that half used to overwrite the node's offset table. */
+static uint32_t splitWithRecord(BTree* tree, uint32_t root, BTNodeDescriptor* descriptor,
+                               int at, BTKey* key, size_t length, unsigned char* content) {
+  unsigned count = descriptor->numRecords + 1;
+  size_t* sizes = calloc(count, sizeof(size_t));
+  unsigned char** records = calloc(count, sizeof(unsigned char*));
+  size_t total = 0;
+  ASSERT(sizes && records, "split allocations");
+  for(unsigned i = 0; i < count; i++) {
+    if(i == (unsigned)at) {
+      sizes[i] = 2 + key->keyLength + length;
+      records[i] = calloc(1, sizes[i]);
+      ASSERT(records[i], "split record allocation");
+      KeyBuffer buffer = {records[i], sizes[i]}; io_func memory = {0};
+      memory.data = &buffer; memory.write = keyBufferWrite;
+      ASSERT(WRITE_KEY(tree, 0, key, &memory), "serialize split key");
+      memcpy(records[i] + 2 + key->keyLength, content, length);
+    } else {
+      unsigned old = i < (unsigned)at ? i : i-1;
+      off_t offset = getRecordOffset(old, root, tree);
+      sizes[i] = getRecordOffset(old+1, root, tree) - offset;
+      records[i] = malloc(sizes[i]);
+      ASSERT(records[i] && READ(tree->io, offset, sizes[i], records[i]), "read split record");
+    }
+    total += sizes[i];
+  }
+  unsigned cut = 0; size_t left = 0, best = SIZE_MAX;
+  for(unsigned i = 1; i < count; i++) {
+    left += sizes[i-1]; size_t right = total-left;
+    if(14 + left + (i+1)*2 > tree->headerRec->nodeSize ||
+       14 + right + (count-i+1)*2 > tree->headerRec->nodeSize) continue;
+    size_t difference = left > right ? left-right : right-left;
+    if(difference < best) { best = difference; cut = i; }
+  }
+  ASSERT(cut, "record cannot fit in a split B-tree node");
+  uint32_t newNode = getNewNode(tree);
+  BTNodeDescriptor next = *descriptor;
+  next.bLink = root; next.numRecords = count-cut;
+  descriptor->fLink = newNode; descriptor->numRecords = cut;
+  if(next.fLink) {
+    BTNodeDescriptor* following = readBTNodeDescriptor(next.fLink, tree);
+    following->bLink = newNode;
+    ASSERT(writeBTNodeDescriptor(following, next.fLink, tree), "update split sibling");
+    free(following);
+  }
+  for(unsigned side = 0; side < 2; side++) {
+    uint32_t node = side ? newNode : root;
+    unsigned begin = side ? cut : 0, end = side ? count : cut;
+    unsigned char* bytes = calloc(1, tree->headerRec->nodeSize);
+    ASSERT(bytes, "split node allocation");
+    size_t pos = 14;
+    for(unsigned i = begin; i <= end; i++) {
+      uint16_t diskOffset = pos; FLIPENDIAN(diskOffset);
+      memcpy(bytes + tree->headerRec->nodeSize - 2*(i-begin+1), &diskOffset, 2);
+      if(i < end) { memcpy(bytes+pos, records[i], sizes[i]); pos += sizes[i]; }
+    }
+    ASSERT(WRITE(tree->io, (off_t)node*tree->headerRec->nodeSize, tree->headerRec->nodeSize, bytes), "write split node");
+    ASSERT(writeBTNodeDescriptor(side ? &next : descriptor, node, tree), "write split descriptor");
+    free(bytes);
+  }
+  if(descriptor->kind == kBTLeafNode) {
+    tree->headerRec->leafRecords++;
+    if(root == tree->headerRec->lastLeafNode) tree->headerRec->lastLeafNode = newNode;
+  }
+  ASSERT(writeBTHeaderRec(tree), "write split header");
+  for(unsigned i = 0; i < count; i++) free(records[i]);
+  free(records); free(sizes);
+  return newNode;
+}
+
 static int addRecord(BTree* tree, uint32_t root, BTKey* searchKey, size_t length, unsigned char* content, int* callAgain) {
   BTNodeDescriptor* descriptor;
   BTKey* key;
@@ -1170,12 +1275,7 @@ static int addRecord(BTree* tree, uint32_t root, BTKey* searchKey, size_t length
 
   if(descriptor->kind == kBTLeafNode) {
     if(freeSpace < (sizeof(searchKey->keyLength) + searchKey->keyLength + length + sizeof(uint16_t))) {
-      newNode = splitNode(root, descriptor, tree);
-      if(i < descriptor->numRecords) {
-        doAddRecord(tree, root, searchKey, length, content);
-      } else {
-        doAddRecord(tree, newNode, searchKey, length, content);
-      }
+      newNode = splitWithRecord(tree, root, descriptor, i, searchKey, length, content);
 
       free(descriptor);
       return newNode;
@@ -1325,6 +1425,12 @@ int addToBTree(BTree* tree, BTKey* searchKey, size_t length, unsigned char* cont
   uint16_t offset;
   uint16_t freeOffset;
   uint32_t newNode;
+  unsigned char* padded = NULL;
+  if(length & 1) {
+    padded = calloc(1, length+1);
+    ASSERT(padded, "record padding allocation");
+    memcpy(padded, content, length); content = padded; length++;
+  }
 
   if(tree->headerRec->rootNode != 0) {
     do {
@@ -1368,6 +1474,7 @@ int addToBTree(BTree* tree, BTKey* searchKey, size_t length, unsigned char* cont
     ASSERT(writeBTHeaderRec(tree), "writeBTHeaderRec");
   }
 
+  free(padded);
   return TRUE;
 }
 
@@ -1457,6 +1564,12 @@ static uint32_t removeRecord(BTree* tree, uint32_t root, BTKey* searchKey, int* 
     lastRecordDataOffset = recordDataOffset;
 
     free(key);
+  }
+
+  if(descriptor->kind == kBTLeafNode) {
+    /* Missing key above the last leaf key: there is no child to traverse. */
+    free(descriptor);
+    return 0;
   }
 
   if(nodeToTraverse == 0) {
@@ -1555,6 +1668,8 @@ int removeFromBTree(BTree* tree, BTKey* searchKey) {
   int callAgain;
   int gone;
   uint32_t newNode;
+
+  if(tree->headerRec->rootNode == 0) return FALSE;
 
   do {
     callAgain = FALSE;

@@ -530,6 +530,7 @@ extern "C" {
 	int setAttribute(Volume* volume, uint32_t fileID, const char* name, uint8_t* data, size_t size);
 	int unsetAttribute(Volume* volume, uint32_t fileID, const char* name);
 	XAttrList* getAllExtendedAttributes(HFSCatalogNodeID CNID, Volume* volume);
+	XAttrList* getAllExtendedAttributesStrict(HFSCatalogNodeID CNID, Volume* volume);
 
 	void flipExtentRecord(HFSPlusExtentRecord* extentRecord);
 
@@ -557,6 +558,7 @@ extern "C" {
 	HFSPlusCatalogRecord* getRecordByCNID(HFSCatalogNodeID CNID, Volume* volume);
 	HFSPlusCatalogRecord* getLinkTarget(HFSPlusCatalogRecord* record, HFSCatalogNodeID parentID, HFSPlusCatalogKey *key, Volume* volume);
 	CatalogRecordList* getFolderContents(HFSCatalogNodeID CNID, Volume* volume);
+	CatalogRecordList* getFolderContentsRaw(HFSCatalogNodeID CNID, Volume* volume);
 	HFSPlusCatalogRecord* getRecordFromPath(const char* path, Volume* volume, char **name, HFSPlusCatalogKey* retKey);
 	HFSPlusCatalogRecord* getRecordFromPath2(const char* path, Volume* volume, char **name, HFSPlusCatalogKey* retKey, char traverse);
 	HFSPlusCatalogRecord* getRecordFromPath3(const char* path, Volume* volume, char **name, HFSPlusCatalogKey* retKey, char traverse, char returnLink, HFSCatalogNodeID parentID);

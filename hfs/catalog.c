@@ -346,7 +346,7 @@ HFSPlusCatalogRecord* getRecordByCNID(HFSCatalogNodeID CNID, Volume* volume) {
 		return record;
 }
 
-CatalogRecordList* getFolderContents(HFSCatalogNodeID CNID, Volume* volume) {
+static CatalogRecordList* folderContents(HFSCatalogNodeID CNID, Volume* volume, int resolveLinks) {
 	BTree* tree;
 	HFSPlusCatalogThread* record;
 	HFSPlusCatalogKey key;
@@ -397,7 +397,7 @@ CatalogRecordList* getFolderContents(HFSCatalogNodeID CNID, Volume* volume) {
 				item->name = currentKey->nodeName;
 				item->record = (HFSPlusCatalogRecord*) READ_DATA(tree, recordDataOffset, tree->io);
 
-				if(item->record->recordType == kHFSPlusFileRecord && (((HFSPlusCatalogFile*)item->record)->userInfo.fileType) == kHardLinkFileType) {
+				if(resolveLinks && item->record->recordType == kHFSPlusFileRecord && (((HFSPlusCatalogFile*)item->record)->userInfo.fileType) == kHardLinkFileType) {
 					sprintf(pathBuffer, "iNode%d", ((HFSPlusCatalogFile*)item->record)->permissions.special.iNodeNum);
 					nkey.parentID = volume->metadataDir;
 					ASCIIToUnicode(pathBuffer, &nkey.nodeName);
@@ -434,6 +434,14 @@ CatalogRecordList* getFolderContents(HFSCatalogNodeID CNID, Volume* volume) {
 	}
 
 	return list;
+}
+
+CatalogRecordList* getFolderContents(HFSCatalogNodeID CNID, Volume* volume) {
+	return folderContents(CNID, volume, TRUE);
+}
+
+CatalogRecordList* getFolderContentsRaw(HFSCatalogNodeID CNID, Volume* volume) {
+	return folderContents(CNID, volume, FALSE);
 }
 
 void releaseCatalogRecordList(CatalogRecordList* list) {
@@ -491,7 +499,7 @@ HFSCatalogNodeID getMetadataDirectoryID(Volume* volume) {
 	memcpy(key.nodeName.unicode, METADATA_DIR, sizeof(METADATA_DIR));
 
 	record = (HFSPlusCatalogFolder*) search(volume->catalogTree, (BTKey*)(&key), &exact, NULL, NULL);
-	id = record->folderID;
+	id = record && exact ? record->folderID : 0;
 
 	free(record);
 

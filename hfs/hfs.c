@@ -9,6 +9,9 @@
 #include <hfs/hfslib.h>
 #include "abstractfile.h"
 #include <inttypes.h>
+#include "manifest.h"
+#include "format.h"
+#include "verify.h"
 
 char endianness;
 
@@ -314,9 +317,26 @@ int main(int argc, const char *argv[]) {
 	int status = 0;
 
 	TestByteOrder();
+	if(argc >= 3 && strcmp(argv[2], "create") == 0)
+		return hfs_format_command(argc, argv);
+	if(argc == 3 && strcmp(argv[2], "verify") == 0)
+		return hfs_verify_image(argv[1]);
+	/* Checked manifest mode is deliberately separate from the legacy heuristics. */
+	if(argc == 3 && strcmp(argv[2], "manifest-version") == 0) {
+		puts("apple-firmware.hfs-native/1");
+		return 0;
+	}
+	if(argc >= 5 && (strcmp(argv[2], "extractall") == 0 || strcmp(argv[2], "addall") == 0 || strcmp(argv[2], "validateall") == 0)) {
+		int i;
+		for(i = 3; i < argc; i++)
+			if(strcmp(argv[i], "--manifest") == 0)
+				return hfs_manifest_command(argc, argv);
+	}
 
 	if(argc < 3) {
-		printf("usage: %s <image-file> <ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|grow|untar|getattr|debug> <arguments>\n", argv[0]);
+		printf("usage: %s <image-file> <create|verify|ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|grow|untar|getattr|debug> <arguments>\n", argv[0]);
+		printf("  create <size> [-n ASCII-name] [-s|-i] [-b blocksize]: fresh bare HFS+/HFSX\n");
+		printf("  verify: read-only native structure/allocation/journal checks\n");
 		return 0;
 	}
 

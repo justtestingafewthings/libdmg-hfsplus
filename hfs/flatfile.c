@@ -75,6 +75,7 @@ io_func* openFlatFile(const char* fileName) {
 
   if(io->data == NULL) {
     perror("fopen");
+    free(io);
     return NULL;
   }
 
@@ -85,6 +86,12 @@ io_func* openFlatFile(const char* fileName) {
   return io;
 }
 
+static int readOnlyWrite(io_func* io, off_t location, size_t size, void* buffer) {
+  (void)io; (void)location; (void)size; (void)buffer;
+  fprintf(stderr, "attempt to write a read-only image\n");
+  return FALSE;
+}
+
 io_func* openFlatFileRO(const char* fileName) {
   io_func* io;
 
@@ -93,11 +100,12 @@ io_func* openFlatFileRO(const char* fileName) {
 
   if(io->data == NULL) {
     perror("fopen");
+    free(io);
     return NULL;
   }
 
   io->read = &flatFileRead;
-  io->write = &flatFileWrite;
+  io->write = &readOnlyWrite;
   io->close = &closeFlatFile;
 
   return io;

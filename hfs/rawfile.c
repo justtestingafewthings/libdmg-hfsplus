@@ -4,6 +4,11 @@
 
 int writeExtents(RawFile* rawFile);
 
+static uint8_t forkType(RawFile* file) {
+	return file->catalogRecord && file->catalogRecord->recordType == kHFSPlusFileRecord
+		&& file->forkData == &((HFSPlusCatalogFile*)file->catalogRecord)->resourceFork ? 0xff : 0;
+}
+
 int isBlockUsed(Volume* volume, uint32_t block)
 {
 	unsigned char byte;
@@ -314,7 +319,7 @@ int removeExtents(RawFile* rawFile) {
 	int exact;
 
 	extentKey.keyLength = sizeof(HFSPlusExtentKey) - sizeof(extentKey.keyLength);
-	extentKey.forkType = 0;
+	extentKey.forkType = forkType(rawFile);
 	extentKey.fileID = rawFile->id;
 
 	forkData = rawFile->forkData;
@@ -384,7 +389,7 @@ int writeExtents(RawFile* rawFile) {
 
 	if(extent != NULL) {
 		extentKey.keyLength = sizeof(HFSPlusExtentKey) - sizeof(extentKey.keyLength);
-		extentKey.forkType = 0;
+		extentKey.forkType = forkType(rawFile);
 		extentKey.fileID = rawFile->id;
 
 		currentExtent = 0;
@@ -428,7 +433,7 @@ int readExtents(RawFile* rawFile) {
 	int exact;
 
 	extentKey.keyLength = sizeof(HFSPlusExtentKey) - sizeof(extentKey.keyLength);
-	extentKey.forkType = 0;
+	extentKey.forkType = forkType(rawFile);
 	extentKey.fileID = rawFile->id;
 
 	forkData = rawFile->forkData;

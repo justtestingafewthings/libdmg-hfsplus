@@ -168,9 +168,13 @@ static int create(const char *output, uint64_t size, uint32_t bs, const char *na
     uint32_t bitmap_blocks = (uint32_t)((bitmap_bytes + bs - 1) / bs);
     /* Full firmware roots need large contiguous system B-trees. Restore
      * ramdisks have only hundreds of records and cannot afford those minima. */
-    uint32_t ext_bytes = size < UINT64_C(512) * 1024 * 1024 ? 256U * 1024 : 4U * 1024 * 1024;
-    uint32_t cat_bytes = size < UINT64_C(512) * 1024 * 1024 ? 2U * 1024 * 1024 : 24U * 1024 * 1024;
-    uint32_t attr_bytes = size < UINT64_C(512) * 1024 * 1024 ? 1U * 1024 * 1024 : 16U * 1024 * 1024;
+    int ramdisk = size < UINT64_C(128) * 1024 * 1024;
+    uint32_t ext_bytes = ramdisk ? 64U * 1024 :
+        size < UINT64_C(512) * 1024 * 1024 ? 256U * 1024 : 4U * 1024 * 1024;
+    uint32_t cat_bytes = ramdisk ? 512U * 1024 :
+        size < UINT64_C(512) * 1024 * 1024 ? 2U * 1024 * 1024 : 24U * 1024 * 1024;
+    uint32_t attr_bytes = ramdisk ? 128U * 1024 :
+        size < UINT64_C(512) * 1024 * 1024 ? 1U * 1024 * 1024 : 16U * 1024 * 1024;
     uint32_t ext_blocks = (ext_bytes + bs - 1) / bs;
     uint32_t cat_blocks = (cat_bytes + bs - 1) / bs;
     uint32_t attr_blocks = (attr_bytes + bs - 1) / bs;

@@ -330,6 +330,8 @@ int main(int argc, const char *argv[]) {
 		puts("apple-firmware.hfs-native/1");
 		return 0;
 	}
+	if(argc >= 3 && (!strcmp(argv[2], "inventory") || !strcmp(argv[2], "extractfiles")))
+		return hfs_manifest_command(argc, argv);
 	if(argc >= 5 && (strcmp(argv[2], "extractall") == 0 || strcmp(argv[2], "addall") == 0 || strcmp(argv[2], "validateall") == 0)) {
 		int i;
 		for(i = 3; i < argc; i++)
@@ -343,6 +345,8 @@ int main(int argc, const char *argv[]) {
 		printf("  shrink <size>: rebuild a smaller bare HFS+/HFSX image, 16 MiB..2 GiB\n");
 		printf("  fit TREE --manifest JSON [--size N] [--reserve N] [--maximum N]: plan in memory and write once\n");
 		printf("  verify: read-only native structure/allocation/journal checks\n");
+		printf("  inventory JSON: native metadata and logical hashes without exporting files\n");
+		printf("  extractfiles TREE --request JSON: regular inodes from {files: [{id, path}]}\n");
 		return 0;
 	}
 

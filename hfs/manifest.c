@@ -32,7 +32,7 @@ typedef struct {
 
 static void fail(const char* message) {
     fprintf(stderr, "hfs manifest: %s\n", message);
-    exit(1);
+    exit(!strcmp(message, "no space left in volume") ? 2 : 1);
 }
 static J* field(J* j, const char* name) {
     J* result;
@@ -448,6 +448,9 @@ static void forkimport(Context* c, HFSPlusCatalogFile* file, HFSPlusForkData* fo
     int fd = contentfd(c, content);
     io_func* io = openRawFile(file->fileID, fork, (HFSPlusCatalogRecord*)file, c->volume);
     int64_t length = json_object_get_int64(field(content, "size"));
+    if((uint64_t)length / c->volume->volumeHeader->blockSize +
+       (length % c->volume->volumeHeader->blockSize != 0) > c->volume->volumeHeader->freeBlocks)
+        fail("no space left in volume");
     if(!io || !allocate(io->data, length)) fail("allocate native fork");
     unsigned char* buffer = malloc(CHUNK); uint64_t offset = 0; ssize_t n;
     if(!buffer) fail("allocation");
@@ -765,7 +768,7 @@ static void prepare_attributes(Context* c) {
     c->volume->attrTree = openAttributesTree(io);
     if(!c->volume->attrTree) fail("open new attribute tree");
 }
-int hfs_manifest_command(int argc, const char** argv) {
+static int manifest_command(int argc, const char** argv, io_func *memory) {
     int exporting = !strcmp(argv[2], "extractall");
     int validating = !strcmp(argv[2], "validateall");
     if(((exporting || validating) && (argc != 6 || strcmp(argv[4], "--manifest"))) ||
@@ -798,7 +801,7 @@ int hfs_manifest_command(int argc, const char** argv) {
         close(c.tree); close(c.storage); json_object_put(c.index); json_object_put(c.document); free(storage);
         return 0;
     }
-    io_func* io = exporting ? openFlatFileRO(argv[1]) : openFlatFile(argv[1]);
+    io_func* io = memory ? memory : exporting ? openFlatFileRO(argv[1]) : openFlatFile(argv[1]);
     if(!io || !(c.volume = openVolume(io))) fail("open HFS volume");
     if(exporting) {
         if(c.volume->volumeHeader->startupFile.logicalSize || c.volume->volumeHeader->startupFile.totalBlocks)
@@ -854,4 +857,17 @@ int hfs_manifest_command(int argc, const char** argv) {
     closeVolume(c.volume); CLOSE(io); close(c.tree); close(c.storage);
     json_object_put(c.index); json_object_put(c.document); free(storage);
     return 0;
+}
+
+int hfs_manifest_command(int argc, const char **argv) { return manifest_command(argc,argv,NULL); }
+int hfs_manifest_import_memory(io_func *io, const char *tree, const char *manifest) {
+    if (!io) return 1;
+    const char *args[]={"hfsplus",":memory:","addall",tree,"/","--manifest",manifest};
+    return manifest_command(7,args,io);
+}
+
+int hfs_manifest_export_memory(io_func *io, const char *tree, const char *manifest) {
+    if (!io) return 1;
+    const char *args[]={"hfsplus",":memory:","extractall",tree,"--manifest",manifest};
+    return manifest_command(6,args,io);
 }

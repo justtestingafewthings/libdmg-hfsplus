@@ -792,7 +792,17 @@ static int growBTree(BTree* tree) {
   BTNodeDescriptor* descriptor;
   BTNodeDescriptor newDescriptor;
 
-  allocate((RawFile*)(tree->io->data), ((RawFile*)(tree->io->data))->forkData->logicalSize + ((RawFile*)(tree->io->data))->forkData->clumpSize);
+  RawFile* fork = (RawFile*)tree->io->data;
+  uint64_t size = fork->forkData->logicalSize + fork->forkData->clumpSize;
+  uint64_t blocks = (size + fork->volume->volumeHeader->blockSize - 1) / fork->volume->volumeHeader->blockSize;
+  if(blocks > (uint64_t)fork->forkData->totalBlocks + fork->volume->volumeHeader->freeBlocks) {
+    fprintf(stderr, "hfs: no space left for B-tree growth\n");
+    exit(2);
+  }
+  if(!allocate(fork, size)) {
+    fprintf(stderr, "hfs: cannot grow B-tree\n");
+    exit(1);
+  }
   increasedNodes = (((RawFile*)(tree->io->data))->forkData->logicalSize/tree->headerRec->nodeSize) - tree->headerRec->totalNodes;
 
   newNodesStart = tree->headerRec->totalNodes / tree->headerRec->nodeSize;

@@ -29,10 +29,16 @@ static void be64(void *p, uint64_t v) {
     be32(p, (uint32_t)(v >> 32));
     be32((unsigned char *)p + 4, (uint32_t)v);
 }
-static int write_at(int fd, uint64_t at, const void *data, size_t n) {
+typedef struct {
+    int fd;
+    io_func *memory;
+} format_output;
+static int write_at(format_output *output, uint64_t at, const void *data, size_t n) {
     const unsigned char *p = data;
+    if (output->memory)
+        return output->memory->write(output->memory, (off_t)at, n, (void *)data);
     while (n) {
-        ssize_t done = pwrite(fd, p, n, (off_t)at);
+        ssize_t done = pwrite(output->fd, p, n, (off_t)at);
         if (done < 0 && errno == EINTR)
             continue;
         if (done <= 0)
@@ -92,7 +98,7 @@ static void fork_header(unsigned char *p, uint64_t logical, uint32_t block, uint
     be32(p + 16, block);
     be32(p + 20, count);
 }
-static int tree_header(int fd, uint64_t at, uint32_t bytes, uint16_t node_size, uint16_t max_key,
+static int tree_header(format_output *output, uint64_t at, uint32_t bytes, uint16_t node_size, uint16_t max_key,
                        unsigned compare, int catalog) {
     unsigned char *node = calloc(1, node_size);
     uint32_t count = bytes / node_size;
@@ -119,11 +125,11 @@ static int tree_header(int fd, uint64_t at, uint32_t bytes, uint16_t node_size, 
     be16(node + node_size - 4, 120);
     be16(node + node_size - 6, 248);
     be16(node + node_size - 8, node_size - 8);
-    ok = write_at(fd, at, node, node_size);
+    ok = write_at(output, at, node, node_size);
     free(node);
     return ok;
 }
-static int root_catalog(int fd, uint64_t at, uint16_t node_size, const char *name, uint32_t date) {
+static int root_catalog(format_output *output, uint64_t at, uint16_t node_size, const char *name, uint32_t date) {
     unsigned char *node = calloc(1, node_size);
     HFSPlusCatalogFolder root = {0};
     size_t n = strlen(name), i;
@@ -158,11 +164,12 @@ static int root_catalog(int fd, uint64_t at, uint16_t node_size, const char *nam
     be16(node + node_size - 2, first);
     be16(node + node_size - 4, second);
     be16(node + node_size - 6, end);
-    ok = write_at(fd, at, node, node_size);
+    ok = write_at(output, at, node, node_size);
     free(node);
     return ok;
 }
-static int create(const char *output, uint64_t size, uint32_t bs, const char *name, int sensitive) {
+static int create(const char *output, uint64_t size, uint32_t bs, const char *name, int sensitive,
+                  io_func *memory) {
     uint64_t total = size / bs, bitmap_bytes = (total + 7) / 8;
     uint32_t front = (1536 + bs - 1) / bs, back = (1024 + bs - 1) / bs;
     uint32_t bitmap_blocks = (uint32_t)((bitmap_bytes + bs - 1) / bs);
@@ -185,20 +192,23 @@ static int create(const char *output, uint64_t size, uint32_t bs, const char *na
     unsigned char header[512] = {0};
     unsigned char *bitmap = NULL;
     char *temporary = NULL;
-    int fd = -1, ok = 0;
+    int fd = -1, ok = 0, saved_errno;
+    format_output writer = {-1, memory};
     uint64_t i;
     if (total > UINT32_MAX || total <= used + back || bitmap_bytes > SIZE_MAX)
         return 0;
     bitmap = calloc(1, (size_t)bitmap_blocks * bs);
-    temporary = malloc(strlen(output) + 16);
-    if (!bitmap || !temporary)
+    temporary = output ? malloc(strlen(output) + 16) : NULL;
+    if (!bitmap || (output && !temporary))
         goto done;
-    sprintf(temporary, "%s.partial-XXXXXX", output);
-    fd = mkstemp(temporary);
-    if (fd < 0)
+    if (output) {
+        sprintf(temporary, "%s.partial-XXXXXX", output);
+        fd = mkstemp(temporary);
+        if (fd < 0 || ftruncate(fd, (off_t)size))
+            goto done;
+    } else if (!memory)
         goto done;
-    if (ftruncate(fd, (off_t)size))
-        goto done;
+    writer.fd = fd;
     for (i = 0; i < used; i++)
         bitmap[i / 8] |= (unsigned char)(0x80 >> (i % 8));
     for (i = total - back; i < bitmap_bytes * 8; i++)
@@ -231,29 +241,30 @@ static int create(const char *output, uint64_t size, uint32_t bs, const char *na
     fork_header(header + 192, (uint64_t)ext_blocks * bs, ext_start, ext_blocks, bs);
     fork_header(header + 272, (uint64_t)cat_blocks * bs, cat_start, cat_blocks, bs);
     fork_header(header + 352, (uint64_t)attr_blocks * bs, attr_start, attr_blocks, bs);
-    if (!write_at(fd, (uint64_t)bitmap_start * bs, bitmap, (size_t)bitmap_blocks * bs) ||
-        !tree_header(fd, (uint64_t)ext_start * bs, ext_blocks * bs, 4096, 10, 0, 0) ||
-        !tree_header(fd, (uint64_t)cat_start * bs, cat_blocks * bs, 8192, 516,
+    if (!write_at(&writer, (uint64_t)bitmap_start * bs, bitmap, (size_t)bitmap_blocks * bs) ||
+        !tree_header(&writer, (uint64_t)ext_start * bs, ext_blocks * bs, 4096, 10, 0, 0) ||
+        !tree_header(&writer, (uint64_t)cat_start * bs, cat_blocks * bs, 8192, 516,
                      sensitive ? kHFSBinaryCompare : kHFSCaseFolding, 1) ||
-        !root_catalog(fd, (uint64_t)cat_start * bs + 8192, 8192, name, date) ||
-        !tree_header(fd, (uint64_t)attr_start * bs, attr_blocks * bs, 8192, 266, 0, 0) ||
-        !write_at(fd, 1024, header, sizeof(header)) || !write_at(fd, size - 1024, header, sizeof(header)) ||
-        fsync(fd))
+        !root_catalog(&writer, (uint64_t)cat_start * bs + 8192, 8192, name, date) ||
+        !tree_header(&writer, (uint64_t)attr_start * bs, attr_blocks * bs, 8192, 266, 0, 0) ||
+        !write_at(&writer, 1024, header, sizeof(header)) || !write_at(&writer, size - 1024, header, sizeof(header)) ||
+        (output && fsync(fd)))
         goto done;
     /* link refuses existing files, symlinks and hardlink aliases atomically. */
-    if (link(temporary, output))
+    if (output && link(temporary, output))
         goto done;
     ok = 1;
 done:
-    if (fd >= 0)
+    saved_errno = errno;
+    if (fd >= 0) {
         close(fd);
-    if (temporary) {
-        unlink(temporary);
-        free(temporary);
+        if (temporary)
+            unlink(temporary);
     }
+    free(temporary);
     free(bitmap);
     if (!ok)
-        fprintf(stderr, "hfsplus create: cannot format/publish image: %s\n", strerror(errno));
+        fprintf(stderr, "hfsplus create: cannot format/publish image: %s\n", strerror(saved_errno));
     return ok;
 }
 int hfs_format_command(int argc, const char *argv[]) {
@@ -295,7 +306,7 @@ int hfs_format_command(int argc, const char *argv[]) {
         perror("hfsplus create");
         return 1;
     }
-    if (!create(argv[1], size, bs, name, sensitive))
+    if (!create(argv[1], size, bs, name, sensitive, NULL))
         return 1;
     printf("created %s: %" PRIu64 " bytes, %s, block size %u\n", argv[1], size, sensitive ? "HFSX" : "HFS+",
            bs);
@@ -307,4 +318,11 @@ usage:
             "  default: HFS+ case-insensitive, 4096-byte blocks; -s creates case-sensitive HFSX\n"
             "  creates a bare sparse, unjournaled filesystem; output must not exist\n");
     return 1;
+}
+
+int hfs_format_memory(io_func *io, uint64_t size, uint32_t bs, const char *name, int sensitive) {
+    if (!io || !name || !*name || strlen(name) > 255 || bs < 512 || bs > 1048576 || (bs & (bs - 1)) ||
+        size < 16 * 1024 * 1024 || size % bs)
+        return 1;
+    return !create(NULL, size, bs, name, sensitive, io);
 }

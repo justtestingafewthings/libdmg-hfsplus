@@ -19,7 +19,7 @@ set(LZFSE_DIR ${PROJECT_SOURCE_DIR}/third_party/lzfse)
 add_library(hfs_lzfse STATIC ${LZFSE_DIR}/lzfse_decode.c ${LZFSE_DIR}/lzfse_decode_base.c
     ${LZFSE_DIR}/lzfse_fse.c ${LZFSE_DIR}/lzvn_decode_base.c)
 include_directories(${LZFSE_DIR})
-add_executable(hfsplus hfs.c manifest.c format.c verify.c)
+add_executable(hfsplus hfs.c manifest.c format.c verify.c fit.c)
 target_link_libraries(hfsplus hfs hfs_lzfse ${JSONC_LDFLAGS} ${OPENSSL_CRYPTO_LIBRARY} ${Iconv_LIBRARIES})
 set_property(TARGET hfsplus APPEND PROPERTY COMPILE_OPTIONS ${JSONC_CFLAGS_OTHER})
 

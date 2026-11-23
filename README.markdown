@@ -81,6 +81,8 @@ ownership or xattrs:
     hfsplus - validateall tree --manifest manifest.json
     hfsplus empty.raw addall tree / --manifest manifest.json
     hfsplus empty.raw verify
+    hfsplus smaller.raw fit tree --manifest manifest.json [--size N] [--reserve N] [--maximum N]
+    hfsplus root.raw shrink 64m
 
 Export paths must be new. Keep `manifest.json.files/` beside the JSON file.
 Import requires a fresh empty volume with matching case mode and block size.

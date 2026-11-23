@@ -13,6 +13,8 @@
 #include "format.h"
 #include "verify.h"
 
+int hfs_fit_command(int argc, const char **argv);
+
 char endianness;
 
 
@@ -317,6 +319,8 @@ int main(int argc, const char *argv[]) {
 	int status = 0;
 
 	TestByteOrder();
+	if(argc >= 3 && (!strcmp(argv[2], "fit") || !strcmp(argv[2], "shrink")))
+		return hfs_fit_command(argc,argv);
 	if(argc >= 3 && strcmp(argv[2], "create") == 0)
 		return hfs_format_command(argc, argv);
 	if(argc == 3 && strcmp(argv[2], "verify") == 0)
@@ -334,8 +338,10 @@ int main(int argc, const char *argv[]) {
 	}
 
 	if(argc < 3) {
-		printf("usage: %s <image-file> <create|verify|ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|grow|untar|getattr|debug> <arguments>\n", argv[0]);
+		printf("usage: %s <image-file> <create|verify|ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|grow|shrink|fit|untar|getattr|debug> <arguments>\n", argv[0]);
 		printf("  create <size> [-n ASCII-name] [-s|-i] [-b blocksize]: fresh bare HFS+/HFSX\n");
+		printf("  shrink <size>: rebuild a smaller bare HFS+/HFSX image, 16 MiB..2 GiB\n");
+		printf("  fit TREE --manifest JSON [--size N] [--reserve N] [--maximum N]: plan in memory and write once\n");
 		printf("  verify: read-only native structure/allocation/journal checks\n");
 		return 0;
 	}

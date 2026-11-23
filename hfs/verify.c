@@ -31,6 +31,7 @@ typedef struct {
 typedef struct {
     jmp_buf error;
     int fd;
+    const unsigned char *memory;
     uint64_t size;
     uint32_t bs, total, free, files, folders, attributes, jinfo;
     unsigned char *used, *bitmap;
@@ -74,6 +75,7 @@ static void set(unsigned char *b, uint32_t n) { b[n / 8] |= (unsigned char)(0x80
 static void read_at(Check *c, uint64_t off, void *buf, size_t n) {
     unsigned char *p = buf;
     require(c, off <= c->size && n <= c->size - off, "read exceeds image");
+    if(c->memory) { memcpy(buf,c->memory+off,n);return; }
     while (n) {
         ssize_t got = pread(c->fd, p, n, (off_t)off);
         require(c, got > 0, "short image read");
@@ -441,7 +443,7 @@ static void catalog_check(Check *c) {
         }
     }
 }
-int hfs_verify_image(const char *path) {
+static int verify_image(const char *path, const void *memory, uint64_t size) {
     Check *c = calloc(1, sizeof(Check));
     int status = 1;
     struct stat st;
@@ -453,10 +455,13 @@ int hfs_verify_image(const char *path) {
         Fork allocation, extents, catalog, attrs, startup;
         uint32_t i, free_count = 0;
         uint64_t bitmap_size;
-        c->fd = open(path, O_RDONLY | O_NOFOLLOW);
-        require(c, c->fd >= 0 && !fstat(c->fd, &st) && S_ISREG(st.st_mode) && st.st_size >= 2048,
-                "image must be a bare regular filesystem file");
-        c->size = (uint64_t)st.st_size;
+        if(memory) { c->memory=memory; c->size=size; require(c,size>=2048,"memory image size"); }
+        else {
+            c->fd = open(path, O_RDONLY | O_NOFOLLOW);
+            require(c, c->fd >= 0 && !fstat(c->fd, &st) && S_ISREG(st.st_mode) && st.st_size >= 2048,
+                    "image must be a bare regular filesystem file");
+            c->size = (uint64_t)st.st_size;
+        }
         read_at(c, 1024, header, sizeof(header));
         require(c,
                 (u16(header) == 0x482b && u16(header + 2) == 4) ||
@@ -535,7 +540,7 @@ int hfs_verify_image(const char *path) {
         free(catalog.ext);
         free(attrs.ext);
         free(startup.ext);
-        printf("The HFS%s volume appears to be OK. Checked catalog, B-trees, forks, allocation bitmap and "
+        if(!memory) printf("The HFS%s volume appears to be OK. Checked catalog, B-trees, forks, allocation bitmap and "
                "journal.\n",
                u16(header) == 0x4858 ? "X" : "+");
         status = 0;
@@ -549,3 +554,6 @@ int hfs_verify_image(const char *path) {
     free(c);
     return status;
 }
+
+int hfs_verify_image(const char *path) { return verify_image(path,NULL,0); }
+int hfs_verify_memory(const void *memory, uint64_t size) { return verify_image(NULL,memory,size); }

@@ -78,8 +78,8 @@ Native manifest interchange preserves Apple metadata without applying host
 ownership or xattrs:
 
     hfsplus source.raw extractall tree --manifest manifest.json
-    hfsplus source.raw inventory inventory.json
-    hfsplus source.raw extractfiles tree --request request.json
+    hfsplus source.raw inventory inventory.json [--metadata-only]
+    hfsplus source.raw extractfiles tree --request request.json  # - reads JSON lines and returns file hashes
     hfsplus - validateall tree --manifest manifest.json
     hfsplus empty.raw addall tree / --manifest manifest.json
     hfsplus empty.raw verify

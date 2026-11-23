@@ -27,7 +27,7 @@ typedef union { HFSPlusCatalogFile file; HFSPlusCatalogFolder folder; } Record;
 typedef struct {
     Volume* volume;
     J *document, *nodes, *index;
-    int tree, storage, inventory;
+    int tree, storage, inventory, metadata_only;
 } Context;
 
 static void fail(const char* message) {
@@ -197,7 +197,7 @@ static void forkhashout(Context* c, HFSPlusCatalogFile* file, HFSPlusForkData* f
         size_t n = fork->logicalSize - pos > CHUNK ? CHUNK : fork->logicalSize - pos;
         if(!READ(io, pos, n, buffer)) fail("read native fork");
         if(hash) { if(EVP_DigestUpdate(hash, buffer, n) != 1) fail("fork digest"); }
-        else writefd(fd, buffer, n);
+        if(fd >= 0) writefd(fd, buffer, n);
         pos += n;
     }
     free(buffer); CLOSE(io);
@@ -222,7 +222,7 @@ static char* journal_digest(Context* c, J* content) {
 }
 static void decodedwrite(int fd, EVP_MD_CTX* hash, const void* p, size_t n) {
     if(hash) { if(EVP_DigestUpdate(hash, p, n) != 1) fail("decoded SHA256 update"); }
-    else writefd(fd, p, n);
+    if(fd >= 0) writefd(fd, p, n);
 }
 static void inflateblock(int fd, EVP_MD_CTX* hash, unsigned char* p, size_t size, size_t expected, uint32_t type) {
     unsigned char buffer[65537]; uLongf n = expected;
@@ -310,19 +310,25 @@ static void logicalhashout(Context* c, HFSPlusCatalogFile* file, int fd, EVP_MD_
 static void logicalout(Context* c, HFSPlusCatalogFile* file, int fd) {
     logicalhashout(c,file,fd,NULL);
 }
-static J* inventorycontent(Context* c, HFSPlusCatalogFile* file, HFSPlusForkData* fork, int inline_bytes) {
-    EVP_MD_CTX* hash=EVP_MD_CTX_new(); unsigned char digest[32]; unsigned int length;
-    uint64_t size=fork ? fork->logicalSize : file->dataFork.logicalSize;
-    if(!fork && (file->permissions.ownerFlags & UF_COMPRESSED)) {
+static uint64_t logicalsize(Context* c, HFSPlusCatalogFile* file) {
+    uint64_t size=file->dataFork.logicalSize;
+    if(file->permissions.ownerFlags & UF_COMPRESSED) {
         unsigned char* attr=NULL; size_t n=getAttribute(c->volume,file->fileID,"com.apple.decmpfs",&attr);
         if(n<16) fail("compression header size"); size=le64(attr+8); free(attr);
     }
-    if(!hash || EVP_DigestInit_ex(hash,EVP_sha256(),NULL)!=1) fail("inventory digest initialization");
-    if(fork) forkhashout(c,file,fork,-1,hash); else logicalhashout(c,file,-1,hash);
-    if(EVP_DigestFinal_ex(hash,digest,&length)!=1 || length!=32) fail("inventory digest final");
-    EVP_MD_CTX_free(hash);
+    return size;
+}
+static J* inventorycontent(Context* c, HFSPlusCatalogFile* file, HFSPlusForkData* fork, int inline_bytes) {
+    uint64_t size=fork ? fork->logicalSize : logicalsize(c,file);
     J* desc=json_object_new_object(); putstr(desc,"location","image");
-    json_object_object_add(desc,"size",json_object_new_uint64(size)); puthex(desc,"sha256",digest,32);
+    json_object_object_add(desc,"size",json_object_new_uint64(size));
+    if(!c->metadata_only || inline_bytes) {
+        EVP_MD_CTX* hash=EVP_MD_CTX_new(); unsigned char digest[32]; unsigned int length;
+        if(!hash || EVP_DigestInit_ex(hash,EVP_sha256(),NULL)!=1) fail("inventory digest initialization");
+        if(fork) forkhashout(c,file,fork,-1,hash); else logicalhashout(c,file,-1,hash);
+        if(EVP_DigestFinal_ex(hash,digest,&length)!=1 || length!=32) fail("inventory digest final");
+        EVP_MD_CTX_free(hash); puthex(desc,"sha256",digest,32);
+    }
     if(inline_bytes) {
         if(!fork || size>64*1024*1024) fail("inventory inline fork size");
         unsigned char* data=malloc((size_t)size+1);
@@ -815,19 +821,20 @@ static void prepare_attributes(Context* c) {
 }
 static int manifest_command(int argc, const char** argv, io_func *memory) {
     int inventory = !strcmp(argv[2], "inventory");
+    int metadata_only = inventory && argc == 5 && !strcmp(argv[4], "--metadata-only");
     int exporting = inventory || !strcmp(argv[2], "extractall");
     int validating = !strcmp(argv[2], "validateall");
-    if((inventory && argc != 4) || (!inventory && (exporting || validating) && (argc != 6 || strcmp(argv[4], "--manifest"))) ||
+    if((inventory && argc != 4 && !metadata_only) || (!inventory && (exporting || validating) && (argc != 6 || strcmp(argv[4], "--manifest"))) ||
        ((!exporting && !validating) && (argc != 7 || strcmp(argv[4], "/") || strcmp(argv[5], "--manifest"))))
         fail("usage: IMAGE extractall TREE --manifest JSON | IMAGE addall TREE / --manifest JSON");
     const char *tree = inventory ? NULL : argv[3], *manifest = argv[inventory ? 3 : (exporting || validating) ? 5 : 6];
     char* storage; if(asprintf(&storage, "%s.files", manifest) < 0) fail("allocation");
-    Context c = {0}; c.inventory=inventory; c.tree=c.storage=-1;
+    Context c = {0}; c.inventory=inventory; c.metadata_only=metadata_only; c.tree=c.storage=-1;
     c.index = json_object_new_object();
     if(exporting) {
         if(access(manifest, F_OK) == 0 || (!inventory && (mkdir(tree, 0700) || mkdir(storage, 0700)))) fail("export destinations must be new");
         c.document = json_object_new_object(); c.nodes = json_object_new_array();
-        putstr(c.document, "schema", inventory ? "apple-firmware.hfs-inventory/1" : SCHEMA); json_object_object_add(c.document, "nodes", c.nodes);
+        putstr(c.document, "schema", metadata_only ? "apple-firmware.hfs-inventory-metadata/1" : inventory ? "apple-firmware.hfs-inventory/1" : SCHEMA); json_object_object_add(c.document, "nodes", c.nodes);
     } else {
         int fd = open(manifest, O_RDONLY|O_NOFOLLOW);
         struct stat st;
@@ -909,24 +916,44 @@ static int manifest_command(int argc, const char** argv, io_func *memory) {
 
 static int extractfiles(int argc,const char** argv) {
     if(argc!=6 || strcmp(argv[4],"--request")) fail("usage: IMAGE extractfiles TREE --request JSON");
-    Context c={0}; struct stat st; int fd=open(argv[5],O_RDONLY|O_NOFOLLOW);
-    if(fd<0 || fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_size<=0 || st.st_size>16*1024*1024) fail("request size/type");
-    J* request=json_object_from_fd(fd); close(fd); J* files=field(request,"files");
-    if(!json_object_is_type(files,json_type_array)) fail("request files type");
+    Context c={0}; int streaming=!strcmp(argv[5],"-"); char* line=NULL; size_t capacity=0;
     c.tree=open(argv[3],O_RDONLY|O_DIRECTORY|O_NOFOLLOW); if(c.tree<0) fail("open extraction tree");
     io_func* io=openFlatFileRO(argv[1]); if(!io || !(c.volume=openVolume(io))) fail("open extraction volume");
-    for(size_t i=0;i<json_object_array_length(files);i++) {
-        J* entry=json_object_array_get_idx(files,i);
-        HFSPlusCatalogRecord* record=getRecordByCNID(number(entry,"id"),c.volume);
-        if(!record || record->recordType!=kHFSPlusFileRecord) fail("extraction requires file inode");
-        HFSPlusCatalogFile* file=(HFSPlusCatalogFile*)record;
-        int type=file->permissions.fileMode & S_IFMT;
-        if((type!=S_IFREG && type!=0) || file->userInfo.fileType==kHardLinkFileType) fail("extraction requires regular backing inode");
-        fd=relative(c.tree,string(entry,"path"),O_WRONLY|O_CREAT|O_EXCL,0,NULL);
-        logicalout(&c,file,fd); if(close(fd)) fail("close extracted file"); free(record);
-    }
-    closeVolume(c.volume); CLOSE(io); close(c.tree); json_object_put(request); return 0;
+    do {
+        J* request;
+        if(streaming) {
+            ssize_t length=getline(&line,&capacity,stdin);
+            if(length<0) { if(!feof(stdin)) fail("read extraction request"); break; }
+            if(length>16*1024*1024) fail("request too large");
+            request=json_tokener_parse(line);
+        } else {
+            struct stat st; int fd=open(argv[5],O_RDONLY|O_NOFOLLOW);
+            if(fd<0 || fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_size<=0 || st.st_size>16*1024*1024) fail("request size/type");
+            request=json_object_from_fd(fd); close(fd);
+        }
+        J* files=field(request,"files");
+        if(!json_object_is_type(files,json_type_array)) fail("request files type");
+        for(size_t i=0;i<json_object_array_length(files);i++) {
+            J* entry=json_object_array_get_idx(files,i);
+            HFSPlusCatalogRecord* record=getRecordByCNID(number(entry,"id"),c.volume);
+            if(!record || record->recordType!=kHFSPlusFileRecord) fail("extraction requires file inode");
+            HFSPlusCatalogFile* file=(HFSPlusCatalogFile*)record;
+            int type=file->permissions.fileMode & S_IFMT;
+            if((type!=S_IFREG && type!=0) || file->userInfo.fileType==kHardLinkFileType) fail("extraction requires regular backing inode");
+            int fd=relative(c.tree,string(entry,"path"),O_WRONLY|O_CREAT|O_EXCL,0,NULL);
+            EVP_MD_CTX* hash=EVP_MD_CTX_new(); unsigned char digest[32]; unsigned int length;
+            if(!hash || EVP_DigestInit_ex(hash,EVP_sha256(),NULL)!=1) fail("extraction digest initialization");
+            logicalhashout(&c,file,fd,hash); if(close(fd)) fail("close extracted file");
+            if(EVP_DigestFinal_ex(hash,digest,&length)!=1 || length!=32) fail("extraction digest final");
+            EVP_MD_CTX_free(hash); puthex(entry,"sha256",digest,32);
+            json_object_object_add(entry,"size",json_object_new_uint64(logicalsize(&c,file))); free(record);
+        }
+        if(puts(json_object_to_json_string_ext(request,JSON_C_TO_STRING_PLAIN))<0 || fflush(stdout)) fail("write extraction receipt");
+        json_object_put(request);
+    } while(streaming);
+    free(line); closeVolume(c.volume); CLOSE(io); close(c.tree); return 0;
 }
+
 int hfs_manifest_command(int argc, const char **argv) {
     if(argc>=3 && !strcmp(argv[2],"extractfiles")) return extractfiles(argc,argv);
     return manifest_command(argc,argv,NULL);

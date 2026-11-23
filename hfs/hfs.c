@@ -345,8 +345,8 @@ int main(int argc, const char *argv[]) {
 		printf("  shrink <size>: rebuild a smaller bare HFS+/HFSX image, 16 MiB..2 GiB\n");
 		printf("  fit TREE --manifest JSON [--size N] [--reserve N] [--maximum N]: plan in memory and write once\n");
 		printf("  verify: read-only native structure/allocation/journal checks\n");
-		printf("  inventory JSON: native metadata and logical hashes without exporting files\n");
-		printf("  extractfiles TREE --request JSON: regular inodes from {files: [{id, path}]}\n");
+		printf("  inventory JSON [--metadata-only]: native metadata and optional logical hashes\n");
+		printf("  extractfiles TREE --request JSON|-: extract {files: [{id, path}]} and return hashes\n");
 		return 0;
 	}
 

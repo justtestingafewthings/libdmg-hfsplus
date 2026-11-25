@@ -9,6 +9,7 @@
 #include <hfs/hfslib.h>
 #include "abstractfile.h"
 #include <inttypes.h>
+#include <iconv.h>
 #include "manifest.h"
 #include "format.h"
 #include "verify.h"
@@ -16,6 +17,50 @@
 int hfs_fit_command(int argc, const char **argv);
 
 char endianness;
+
+static int cmd_volname(Volume* volume) {
+	HFSPlusCatalogKey key = {0};
+	HFSPlusCatalogThread* thread;
+	int exact = 0;
+	char buffer[sizeof(thread->nodeName.unicode) * 2 + 1];
+	char *input, *output = buffer;
+	size_t inputSize, outputSize = sizeof(buffer) - 1;
+	iconv_t codec;
+
+	key.parentID = kHFSRootFolderID;
+	key.keyLength = sizeof(key.parentID) + sizeof(key.nodeName.length);
+	thread = search(volume->catalogTree, (BTKey*)&key, &exact, NULL, NULL);
+	if(!thread || !exact || thread->recordType != kHFSPlusFolderThreadRecord ||
+	   thread->parentID != kHFSRootParentID || thread->nodeName.length > 255) {
+		fprintf(stderr, "volname: invalid root folder thread\n");
+		free(thread);
+		return 1;
+	}
+
+	input = (char*)thread->nodeName.unicode;
+	inputSize = thread->nodeName.length * 2;
+	codec = iconv_open("UTF-8", endianness == IS_LITTLE_ENDIAN ? "UTF-16LE" : "UTF-16BE");
+	if(codec == (iconv_t)-1) {
+		fprintf(stderr, "volname: cannot initialize UTF-8 conversion\n");
+		free(thread);
+		return 1;
+	}
+	if(iconv(codec, &input, &inputSize, &output, &outputSize) == (size_t)-1) {
+		fprintf(stderr, "volname: invalid UTF-16 volume name\n");
+		iconv_close(codec);
+		free(thread);
+		return 1;
+	}
+	iconv_close(codec);
+	free(thread);
+	*output = '\n';
+	if(fwrite(buffer, 1, output - buffer + 1, stdout) != (size_t)(output - buffer + 1) ||
+	   fflush(stdout) == EOF) {
+		fprintf(stderr, "volname: cannot write volume name\n");
+		return 1;
+	}
+	return 0;
+}
 
 
 void cmd_ls(Volume* volume, int argc, const char *argv[]) {
@@ -340,17 +385,22 @@ int main(int argc, const char *argv[]) {
 	}
 
 	if(argc < 3) {
-		printf("usage: %s <image-file> <create|verify|ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|grow|shrink|fit|untar|getattr|debug> <arguments>\n", argv[0]);
+		printf("usage: %s <image-file> <create|verify|volname|ls|cat|mv|symlink|mkdir|add|rm|chmod|chown|extract|extractall|rmall|addall|grow|shrink|fit|untar|getattr|debug> <arguments>\n", argv[0]);
 		printf("  create <size> [-n ASCII-name] [-s|-i] [-b blocksize]: fresh bare HFS+/HFSX\n");
 		printf("  shrink <size>: rebuild a smaller bare HFS+/HFSX image, 16 MiB..2 GiB\n");
 		printf("  fit TREE --manifest JSON [--size N] [--reserve N] [--maximum N]: plan in memory and write once\n");
 		printf("  verify: read-only native structure/allocation/journal checks\n");
+		printf("  volname: print the volume name as UTF-8, read-only\n");
 		printf("  inventory JSON [--metadata-only]: native metadata and optional logical hashes\n");
 		printf("  extractfiles TREE --request JSON|-: extract {files: [{id, path}]} and return hashes\n");
 		return 0;
 	}
 
-	io = openFlatFile(argv[1]);
+	if(strcmp(argv[2], "volname") == 0 && argc != 3) {
+		fprintf(stderr, "usage: hfsplus <image-file> volname\n");
+		return 1;
+	}
+	io = strcmp(argv[2], "volname") == 0 ? openFlatFileRO(argv[1]) : openFlatFile(argv[1]);
 	if(io == NULL) {
 		fprintf(stderr, "error: Cannot open image-file.\n");
 		return 1;
@@ -364,7 +414,9 @@ int main(int argc, const char *argv[]) {
 	}
 
 	if(argc > 1) {
-		if(strcmp(argv[2], "ls") == 0) {
+		if(strcmp(argv[2], "volname") == 0) {
+			status = cmd_volname(volume);
+		} else if(strcmp(argv[2], "ls") == 0) {
 			cmd_ls(volume, argc - 2, argv + 2);
 		} else if(strcmp(argv[2], "cat") == 0) {
 			cmd_cat(volume, argc - 2, argv + 2);

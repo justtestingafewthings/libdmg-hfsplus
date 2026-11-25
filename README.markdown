@@ -64,6 +64,7 @@ Create a fresh bare HFS+ or HFSX filesystem, check it, and convert it to a DMG:
 
     hfsplus root.raw create 2g -n Root -s -b 4096
     hfsplus root.raw verify
+    hfsplus root.raw volname
     dmg dmg root.raw root.dmg
 
 `create` refuses existing paths and creates a sparse, unjournaled image. Sizes

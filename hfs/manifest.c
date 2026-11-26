@@ -27,6 +27,9 @@ static void fail(const char* message);
 #ifdef __APPLE__
 /* openat, mkdirat and symlinkat were added after OS X 10.8. This tool is
  * single-threaded, so a directory fd can safely serve as the temporary cwd. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0x1000000
+#endif
 static int enter_dir(int dir) {
     int previous = open(".", O_RDONLY | O_DIRECTORY);
     if(previous < 0 || fchdir(dir)) fail("cannot enter host directory");
@@ -45,7 +48,11 @@ static int legacy_openat(int dir, const char* name, int flags, ...) {
         va_end(args);
     }
     int previous = enter_dir(dir);
-    int result = open(name, flags, mode);
+    int result = open(name, flags & ~O_CLOEXEC, mode);
+    if(result >= 0 && (flags & O_CLOEXEC) && fcntl(result, F_SETFD, FD_CLOEXEC) < 0) {
+        close(result);
+        result = -1;
+    }
     leave_dir(previous);
     return result;
 }
@@ -85,6 +92,30 @@ static int legacy_linkat(int source_dir, const char* source, int target_dir,
 #define symlinkat legacy_symlinkat
 #define readlinkat legacy_readlinkat
 #define linkat legacy_linkat
+#if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && \
+    __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 1070
+static ssize_t legacy_getline(char** line, size_t* capacity, FILE* input) {
+    if(!line || !capacity || !input) { errno = EINVAL; return -1; }
+    size_t length = 0;
+    int ch;
+    while((ch = fgetc(input)) != EOF) {
+        if(length + 1 >= *capacity) {
+            size_t size = *capacity ? *capacity * 2 : 128;
+            if(size <= length + 1) size = length + 2;
+            char* next = realloc(*line, size);
+            if(!next) return -1;
+            *line = next;
+            *capacity = size;
+        }
+        (*line)[length++] = (char)ch;
+        if(ch == '\n') break;
+    }
+    if(!length) return -1;
+    (*line)[length] = 0;
+    return (ssize_t)length;
+}
+#define getline legacy_getline
+#endif
 #endif
 
 #define SCHEMA "apple-firmware.hfs-native/1"

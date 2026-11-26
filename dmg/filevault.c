@@ -10,7 +10,8 @@
 
 #ifdef USE_COMMONCRYPTO
 
-#include <CommonCrypto/CommonCrypto.h>
+#include <CommonCrypto/CommonCryptor.h>
+#include <CommonCrypto/CommonHMAC.h>
 
 #define AES_set_decrypt_key(in, len, out) (memcpy((out), (in), (len) / 8))
 #define AES_set_encrypt_key(in, len, out) (memcpy((out), (in), (len) / 8))
@@ -21,7 +22,7 @@
 static inline void AES_cbc_encrypt(const void *in, void *out, size_t len, const AES_KEY *key, const void *iv, uint32_t mode)
 {
 	size_t tmp = 0;
-	CCCrypt(mode, kCCAlgorithmAES, 0, key, FILEVAULT_CIPHER_KEY_LENGTH, iv, in, len, out, len, &tmp);
+	CCCrypt(mode, kCCAlgorithmAES128, 0, key, FILEVAULT_CIPHER_KEY_LENGTH, iv, in, len, out, len, &tmp);
 }
 
 #else /* USE_COMMONCRYPTO */

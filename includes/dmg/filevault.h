@@ -8,7 +8,8 @@
 
 #ifdef USE_COMMONCRYPTO
 
-#include <CommonCrypto/CommonCrypto.h>
+#include <CommonCrypto/CommonCryptor.h>
+#include <CommonCrypto/CommonHMAC.h>
 
 typedef uint8_t AES_KEY[16];
 

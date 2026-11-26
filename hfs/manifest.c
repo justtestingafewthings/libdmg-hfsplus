@@ -17,8 +17,75 @@
 #include <iconv.h>
 #include <inttypes.h>
 #include <stddef.h>
+#include <stdarg.h>
+#include <limits.h>
 #include <string.h>
 #include "manifest.h"
+
+static void fail(const char* message);
+
+#ifdef __APPLE__
+/* openat, mkdirat and symlinkat were added after OS X 10.8. This tool is
+ * single-threaded, so a directory fd can safely serve as the temporary cwd. */
+static int enter_dir(int dir) {
+    int previous = open(".", O_RDONLY | O_DIRECTORY);
+    if(previous < 0 || fchdir(dir)) fail("cannot enter host directory");
+    return previous;
+}
+static void leave_dir(int previous) {
+    if(fchdir(previous)) fail("cannot restore host directory");
+    close(previous);
+}
+static int legacy_openat(int dir, const char* name, int flags, ...) {
+    mode_t mode = 0;
+    if(flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        mode = va_arg(args, int);
+        va_end(args);
+    }
+    int previous = enter_dir(dir);
+    int result = open(name, flags, mode);
+    leave_dir(previous);
+    return result;
+}
+static int legacy_mkdirat(int dir, const char* name, mode_t mode) {
+    int previous = enter_dir(dir);
+    int result = mkdir(name, mode);
+    leave_dir(previous);
+    return result;
+}
+static int legacy_symlinkat(const char* target, int dir, const char* name) {
+    int previous = enter_dir(dir);
+    int result = symlink(target, name);
+    leave_dir(previous);
+    return result;
+}
+static ssize_t legacy_readlinkat(int dir, const char* name, char* target, size_t size) {
+    int previous = enter_dir(dir);
+    ssize_t result = readlink(name, target, size);
+    leave_dir(previous);
+    return result;
+}
+static int legacy_linkat(int source_dir, const char* source, int target_dir,
+                         const char* target, int flags) {
+    char directory[PATH_MAX], path[PATH_MAX];
+    if(flags || fcntl(source_dir, F_GETPATH, directory) < 0 ||
+       snprintf(path, sizeof(path), "%s/%s", directory, source) >= sizeof(path)) {
+        errno = EINVAL;
+        return -1;
+    }
+    int previous = enter_dir(target_dir);
+    int result = link(path, target);
+    leave_dir(previous);
+    return result;
+}
+#define openat legacy_openat
+#define mkdirat legacy_mkdirat
+#define symlinkat legacy_symlinkat
+#define readlinkat legacy_readlinkat
+#define linkat legacy_linkat
+#endif
 
 #define SCHEMA "apple-firmware.hfs-native/1"
 #define CHUNK (1024 * 1024)
